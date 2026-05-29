@@ -1,6 +1,6 @@
 import pytest
 
-from main import Manager, ProcessorStub, FolderStub
+from file_handling_example.main import Manager, ProcessorStub, FolderStub
 
 @pytest.fixture
 def manager():
