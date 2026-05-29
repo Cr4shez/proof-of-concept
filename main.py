@@ -1,6 +1,8 @@
 import abc
 import asyncio
-from io import BufferedIOBase
+from io import BufferedIOBase, BytesIO
+from typing import AsyncGenerator, AsyncIterable
+
 
 class Processor(abc.ABC):
     def encrypt_and_compress(self, data: bytes) -> bytes:
@@ -22,6 +24,12 @@ class Folder(abc.ABC):
         ...
 
 
+async def aenumerate(async_iterable: AsyncIterable):
+    idx = 0
+    async for item in async_iterable:
+        yield idx, item
+        idx += 1
+
 
 class Manager:
     def __init__(self, processor: Processor, folder: Folder) -> None:
@@ -29,11 +37,42 @@ class Manager:
         self._folder = folder
 
     async def backup(self, in_stream: BufferedIOBase):
-        pass
+        chunk_size = self._folder.MAX_FILE_SIZE
+        async with asyncio.TaskGroup() as tg:
+            async for idx, chunk in aenumerate(self._get_chunks(in_stream, chunk_size)):
+                encrypted_chunk = self._processor.encrypt_and_compress(chunk)
+                chunk_name = f"{idx}_backup"
+                tg.create_task(self._folder.write_file(chunk_name, encrypted_chunk))
 
     async def restore(self, out_stream: BufferedIOBase):
-        pass
+        files = await self._folder.list_files()
 
+        lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(3)
+        async with asyncio.TaskGroup() as tg:
+            for i in range(len(files)):
+                tg.create_task(self._read_and_decypher(i, out_stream, lock, semaphore))
+
+        out_stream.seek(0)
+        return out_stream
+
+    async def _get_chunks(self, in_stream: BufferedIOBase, chunk_size: int) -> AsyncGenerator[bytes]:
+        while True:
+            data = await asyncio.to_thread(in_stream.read, chunk_size)
+            if not data:
+                break
+            yield data
+
+    async def _read_and_decypher(self, idx, out, lock, semaphore):
+        async with semaphore:
+            name = f"{idx}_backup"
+            chunk = await self._folder.read_file(name)
+            decrypted_chunk = self._processor.decrypt_and_decompress(chunk)
+            offset = idx * self._folder.MAX_FILE_SIZE
+            async with lock:
+                out.seek(offset)
+                await asyncio.to_thread(out.write, decrypted_chunk)
+        return self._processor.decrypt_and_decompress(chunk)
 
 
 class FolderStub(Folder):
@@ -72,3 +111,15 @@ class ProcessorStub(Processor):
             return b""
         return bytes(b ^ self._encryption_key for b in data)
 
+
+async def main():
+    manager = Manager(processor=ProcessorStub(), folder=FolderStub())
+    await manager.backup(BytesIO(b"This is the text that will be divided into multiple files"))
+
+    out = BytesIO()
+    await manager.restore(out)
+    print(out.read())
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
